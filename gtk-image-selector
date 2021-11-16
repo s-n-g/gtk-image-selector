@@ -1,0 +1,423 @@
+#!/usr/bin/env python
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, GdkPixbuf
+from sys import exit
+from os import path
+from argparse import ArgumentParser
+
+
+class ImageSelector(Gtk.Window):
+
+    width = 800
+    height = 600
+    preview_size = 256
+    default_image = '/usr/share/icons/Adwaita/512x512/mimetypes/image-x-generic.png'
+    icon = '/usr/share/icons/Adwaita/16x16/mimetypes/image-x-generic.png'
+
+    _window_title = _ok_label = _cancel_label =_filter_label = None
+    filename = folder = None
+    using_hardcoded_image = True
+    default_image_error = False
+    default_image_error_from_config = False
+    _label_size = 'Size:'
+    _window_title = 'Image Selector'
+
+    def __init__(
+        self,
+        filename=None,
+        folder=None,
+        default_image=None,
+        preview_size=None,
+        position=None,
+        ok_label=None,
+        window_title=None,
+        cancel_label=None,
+        filter_label=None,
+        label_size=None,
+        no_config=False,
+        show_scale=False
+    ):
+
+        if not no_config:
+            self.read_config()
+            if self.default_image_error_from_config:
+                self.error_message(msg='''The "deault_image" parameter provided by the configuration file refers to an image that does not exist!
+
+Please edit your configuration file and try again.
+                          ''')
+                return
+
+        if default_image:
+            if path.exists(default_image):
+                self.default_image=default_image
+                self.using_hardcoded_image = False
+            else:
+                self.default_image_error = True
+                self.error_message(
+                    title=self._window_title,
+                    msg='''The file provided by the "-m" ("--default-image") command line parameter does not exist!
+
+Please specify an existing file and try again.
+                          ''')
+                return
+        else:
+            if not path.exists(self.default_image):
+                self.error_message(
+                    msg='''The  hardcoded image file used by gtk-img-selector
+    "'/usr/share/icons/Adwaita/512x512/mimetypes/image-x-generic.png"
+does not exist.
+
+Please specify an existing file using the "-m" ("--default-image") command line parameter and try again.
+                          ''')
+                self.default_image_error = True
+                return
+        if ok_label:
+            self._ok_label = ok_label
+        if cancel_label:
+            self._cancel_label = cancel_label
+        if window_title:
+            self._window_title = window_title
+        if filter_label:
+            self._filter_label = filter_label
+        if label_size:
+            self._label_size = label_size
+        if show_scale:
+            self._show_scale = _show_scale
+        if filename:
+            if path.exists(filename):
+                self.filename = filename
+        elif folder:
+            if path.exists(folder):
+                self.folder = folder
+
+        super().__init__(title=self._window_title if self._window_title else 'Select an Image')
+        self._size_label = Gtk.Label()
+        if preview_size:
+            try:
+                self.preview_size = int(preview_size)
+            except ValueError:
+                self.preview_size = 256
+        if not 100 <= self.preview_size <= 1000:
+            self.preview_size = 256
+        self.set_border_width(5)
+        self.connect("destroy", Gtk.main_quit)
+        self.old_rect = (0, 0)
+        box_h = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        box_v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        self.add(box_h)
+
+        accel_group = Gtk.AccelGroup()
+        self.add_accel_group(accel_group)
+        key, modifier = Gtk.accelerator_parse('Escape')
+        accel_group.connect(key, modifier, Gtk.AccelFlags.VISIBLE, Gtk.main_quit)
+        key, modifier = Gtk.accelerator_parse('Return')
+        accel_group.connect(key, modifier, Gtk.AccelFlags.VISIBLE, self.enter_pressed)
+
+        self.filechooserwidget = Gtk.FileChooserWidget(action=Gtk.FileChooserAction.OPEN)
+        filt = Gtk.FileFilter()
+        filt.add_pattern('*.jpg')
+        filt.add_pattern('*.png')
+        filt.set_name(self._filter_label if self._filter_label else 'Images')
+        self.filechooserwidget.add_filter(filt)
+        self.filechooserwidget.connect('update_preview', self.update_preview_handler)
+        self.filechooserwidget.connect('selection_changed', self.selection_changed_handler)
+        if self.filename:
+            self.filechooserwidget.set_filename(self.filename)
+        elif self.folder:
+            self.filechooserwidget.set_current_folder(self.folder)
+        self.image = Gtk.Image()
+        self._set_image()
+
+
+        if show_scale:
+            self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 100, 1000, 5)
+            self.scale.set_value(self.preview_size)
+            self.scale.add_mark(self.preview_size, Gtk.PositionType.TOP, None)
+            self.scale.connect('value_changed', self.scale_changed)
+
+
+        box_h.pack_start(self.filechooserwidget, True, True, 0)
+        box_h.pack_start(box_v, False, False, 10)
+
+        fr_img = Gtk.Frame()
+        fr_img.set_property('shadow_type', Gtk.ShadowType.IN)
+        fr_img.add(self.image)
+
+        if show_scale:
+            box_v.pack_start(self.scale, False, False, 5)
+        box_v.pack_start(fr_img, False, False, 5)
+        box_v.pack_start(self._size_label, False, False, 5)
+        frame = Gtk.Frame()
+        frame.set_property('shadow_type', 0)
+        box_v.pack_start(frame, True, True, 0)
+
+        buttonbox = Gtk.ButtonBox(orientation=Gtk.Orientation.HORIZONTAL)
+        buttonbox.set_layout(Gtk.ButtonBoxStyle.CENTER)
+        buttonbox.set_spacing(2)
+        box_v.pack_start(buttonbox, False, False, 5)
+
+        self.button_select = Gtk.Button(
+            label=self._ok_label if self._ok_label else "_Select",
+            use_underline=True)
+        self.button_select.connect("clicked", self.file_selected)
+        buttonbox.add(self.button_select)
+        button_cancel = Gtk.Button(
+            label=self._cancel_label if self._cancel_label else "_Cancel",
+            use_underline=True)
+        button_cancel.connect("clicked", Gtk.main_quit)
+        buttonbox.add(button_cancel)
+
+        if self.filechooserwidget.get_filename():
+            self.button_select.set_sensitive(True)
+        else:
+            self.button_select.set_sensitive(False)
+
+        self.resize(1, 1)
+        if position:
+            self._set_position(position)
+
+    def _set_position(self, pos):
+        if pos == 'center':
+            # self.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+            self.set_position(Gtk.WindowPosition.CENTER)
+            # self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        else:
+            try:
+                sp = pos.split(',')
+            except AttributeError:
+                return
+            if len(sp) == 2:
+                sp[0] = sp[0].strip()
+                sp[1] = sp[1].strip()
+            try:
+                self.move(int(sp[0]), int(sp[1]))
+            except ValueError:
+                pass
+
+    def read_config(self):
+        for a_config_file in self.get_config_filename():
+            if path.exists(a_config_file):
+                lines = []
+                try:
+                    with open(a_config_file, 'r') as cfgfile:
+                        lines = [line.strip() for line in cfgfile if line.strip() and not line.startswith('#') ]
+
+                except:
+                    return -1
+
+                for line in lines:
+                    sp = line.split('=')
+
+                    if len(sp) == 2:
+                        sp[0] = sp[0].strip()
+                        sp[1] = sp[1].strip()
+
+                        if sp[0] and sp[1]:
+                            if sp[0] == 'folder':
+                                if path.exists(sp[1]):
+                                    self.folder = path.expanduser(sp[1])
+
+                            elif sp[0] == 'preview_size':
+                                try:
+                                    x = int(sp[1])
+                                    if 100 <= x <= 1000:
+                                        self.preview_size = x
+                                except ValueError:
+                                    pass
+
+                            elif sp[0] == 'default_image':
+                                if path.exists(sp[1]):
+                                    self.default_image = path.expanduser(sp[1])
+                                else:
+                                    self.default_image_error_from_config = True
+
+                            elif sp[0] == 'icon':
+                                if path.exists(sp[1]):
+                                    self.icon = sp[1]
+
+                            elif sp[0] == 'window_title':
+                                self._window_title = sp[1]
+
+                            elif sp[0] == 'ok_label':
+                                self._ok_label = sp[1]
+
+                            elif sp[0] == 'cancel_label':
+                                self._cancel_label = sp[1]
+
+                            elif sp[0] == 'filter_label':
+                                self._filter_label = sp[1]
+
+                            elif sp[0] == 'size_label':
+                                self._label_size = sp[1]
+
+                            elif sp[0] == 'show_scale':
+                                tmp = sp[1].lower()
+                                self._show_scale = True if tmp == 'true' else False
+
+    def enter_pressed(self, accel_grp, widget, key, flags):
+        if self.button_select.get_sensitive():
+            print(self.filechooserwidget.get_filename())
+            Gtk.main_quit()
+
+    def file_selected(self, button):
+        print(self.filechooserwidget.get_filename())
+        Gtk.main_quit()
+
+    def scale_changed(self, a_scale):
+        self.preview_size = a_scale.get_value()
+        self.update_preview_handler(self.filechooserwidget)
+
+    def selection_changed_handler(self, file_chooser):
+        file_name = self.filechooserwidget.get_filename()
+        if file_name:
+            if path.isfile(file_name):
+                self.button_select.set_sensitive(True)
+            else:
+                self.button_select.set_sensitive(False)
+                self._set_image(None)
+
+    def update_preview_handler(self, file_chooser):
+        file_name = self.filechooserwidget.get_filename()
+        if file_name:
+            if path.isfile(file_name):
+                self._set_image(file_name)
+                return
+        self._set_image()
+
+    def _set_image(self, file_name=None):
+        if file_name is None:
+            file_name = self.default_image
+        if path.isfile(file_name):
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                    file_name,
+                    self.preview_size, self.preview_size, True
+                )
+                self.image.set_from_pixbuf(pix)
+                if file_name == self.default_image:
+                    self._size_label.set_text(self._label_size + ' 0x0')
+                else:
+                    x = pix.get_file_info(file_name)
+                    self._size_label.set_text(self._label_size + ' {0}x{1}'.format(x.width, x.height))
+            except:
+                self._set_image()
+
+    @staticmethod
+    def get_config_filename():
+        return '/etc/gtk-image-selector.conf', path.join(path.expanduser('~'), '.config', 'gtk-image-selector', 'config')
+
+    @staticmethod
+    def error_message(msg, parent=None, title=None):
+        """
+        create an error message dialog with string msg.  Optionally set
+        the parent widget and dialog title
+        """
+
+        dialog = Gtk.MessageDialog(
+            parent         = None,
+            message_type   = Gtk.MessageType.ERROR,
+            buttons        = Gtk.ButtonsType.OK,
+            text = msg)
+        if parent is not None:
+            dialog.set_transient_for(parent)
+        if title is not None:
+            dialog.set_title(title)
+        else:
+            dialog.set_title('Error!')
+        dialog.show()
+        dialog.run()
+        dialog.destroy()
+        return None
+
+    @staticmethod
+    def dump_config():
+        print('''# the default folder to browse
+folder =
+\n# the default size of the image preview
+preview_size = 256
+\n# the image to show when no image file is selected
+# or when the selected image is broken
+# please make sure this image actually exists
+default_image = /usr/share/icons/Adwaita/512x512/mimetypes/image-x-generic.png
+\n# the icon to use as a window icon
+icon = /usr/share/icons/Adwaita/16x16/mimetypes/image-x-generic.png
+\n# set this to True to display the image scaling widget
+show_scale = False
+\n# window title and labels
+window_title = Select an Image
+ok_label = _Select
+cancel_label = _Cancel
+filter_label = Images
+size_label = Size:\n''')
+
+def main():
+    parser = ArgumentParser(description='A Gtk Image Chooser with Preview')
+
+    parser.add_argument('-n', '--no-config', default=False, action='store_true',
+                        help='do not attempt to read any config file; just use the command line parameters')
+    parser.add_argument('-m', '--default-image', default=None,
+                        help='the image to display when no preview is available (proposed size: 512x521)')
+    parser.add_argument('-f', '--file', default=None,
+                        help='default file to select')
+    parser.add_argument('-d', '--directory', default='',
+                        help='default directory to show')
+    parser.add_argument('-p', '--position', default=None,
+                        help='set window position, either as X,Y of "center"')
+    parser.add_argument('-r', '--preview-size', default=None,
+                        help='set preview image size (100-1000)')
+    parser.add_argument('-s', '--show-scale', default=False, action='store_true',
+                        help='show scale widget (hidden by default)')
+    parser.add_argument('-i', '--icon', default=None,
+                        help='set window icon')
+    parser.add_argument('-w', '--window_title', default=None,
+                        help='set window title')
+    parser.add_argument('-o', '--ok-label', default=None,
+                        help='set OK button label')
+    parser.add_argument('-c', '--cancel-label', default=None,
+                        help='set Cancel button label')
+    parser.add_argument('-t', '--filter-label', default=None,
+                        help='set filter field label')
+    parser.add_argument('-l', '--size-label', default=None,
+                        help='set size field label')
+    parser.add_argument('--dump-config', default=False, action='store_true',
+                        help='print a sample config file (can be saved to /etc/gtk-image-selector.conf or ~/.config/gtk-image-selector/config)')
+
+    args = parser.parse_args()
+
+    if args.dump_config:
+        ImageSelector.dump_config()
+        exit(0)
+
+    if args.file:
+        args.file = path.expanduser(args.file)
+    if args.directory:
+        args.directory = path.expanduser(args.directory)
+
+    window = ImageSelector(
+        no_config=args.no_config,
+        filename=args.file,
+        folder=args.directory,
+        default_image=args.default_image,
+        position=args.position,
+        preview_size=args.preview_size,
+        window_title=args.window_title,
+        ok_label=args.ok_label,
+        cancel_label=args.cancel_label,
+        filter_label=args.filter_label,
+        label_size=args.size_label,
+        show_scale=args.show_scale
+    )
+    if window.default_image_error_from_config:
+        return
+    if args.icon:
+        if path.exists(args.icon):
+            Gtk.Window.set_icon_from_file(window, args.icon)
+    if window.default_image_error:
+        return
+    window.show_all()
+    Gtk.main()
+
+if __name__ == "__main__":
+    main()
+
