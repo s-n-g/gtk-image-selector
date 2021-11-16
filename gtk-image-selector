@@ -182,8 +182,10 @@ Please specify an existing file using the "-m" ("--default-image") command line 
 
     def _double_click_handler(self, win, event):
         if event.type == Gdk.EventType._2BUTTON_PRESS:
-            if self.filechooserwidget.get_filename():
-                self.file_selected(None)
+            filename = self.filechooserwidget.get_filename()
+            if filename:
+                if path.isfile(filename):
+                    self.file_selected(None)
 
     def _set_position(self, pos):
         if pos == 'center':
